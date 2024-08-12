@@ -3,6 +3,7 @@ use crate::define_atomic_id;
 use bevy_asset::{io::Reader, Asset, AssetLoader, AssetPath, Handle, LoadContext};
 use bevy_reflect::TypePath;
 use bevy_utils::tracing::error;
+use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, marker::Copy};
 use thiserror::Error;
 
@@ -184,6 +185,7 @@ impl<'a> From<&'a Shader> for naga_oil::compose::NagaModuleDescriptor<'a> {
             source: shader.source.as_str(),
             file_path: &shader.path,
             shader_type: (&shader.source).into(),
+            additional_imports: (&shader.additional_imports),
             ..Default::default()
         }
     }
@@ -265,10 +267,10 @@ impl AssetLoader for ShaderLoader {
         load_context: &'a mut LoadContext<'_>,
     ) -> Result<Shader, Self::Error> {
         let ext = load_context.path().extension().unwrap().to_str().unwrap();
-        let path = load_context.asset_path().to_string();
+
         // On windows, the path will inconsistently use \ or /.
         // TODO: remove this once AssetPath forces cross-platform "slash" consistency. See #10511
-        let path = path.replace(std::path::MAIN_SEPARATOR, "/");
+        let path = load_context.asset_path().to_string();
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
         let mut shader = match ext {
@@ -290,6 +292,30 @@ impl AssetLoader for ShaderLoader {
                 shader.file_dependencies.push(load_context.load(asset_path));
             }
         }
+
+        let mut maybe_query_string = load_context
+            .asset_path()
+            .query_string()
+            .map(|x| x.to_string());
+        if let Some(query_string) = maybe_query_string.take() {
+            let mut maybe_additional_imports = query_string
+                .strip_prefix("additional_imports=")
+                .map(|x| x.to_string());
+            if let Some(imports) = maybe_additional_imports.take() {
+                for path in imports.split(',').map(|x| x.to_string()) {
+                    let additional_import_shader = load_context.load(path.clone());
+                    shader.file_dependencies.push(additional_import_shader);
+                    let asset_path = ShaderImport::AssetPath(path.clone());
+                    shader.imports.push(asset_path.clone());
+                    shader
+                        .additional_imports
+                        .push(naga_oil::compose::ImportDefinition {
+                            import: asset_path.module_name().to_string(),
+                            ..Default::default()
+                        });
+                }
+            }
+        };
         Ok(shader)
     }
 
@@ -298,7 +324,7 @@ impl AssetLoader for ShaderLoader {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+#[derive(Debug, PartialEq, Eq, Clone, Hash, Serialize, Deserialize)]
 pub enum ShaderImport {
     AssetPath(String),
     Custom(String),

@@ -53,6 +53,7 @@ pub struct AssetPath<'a> {
     source: AssetSourceId<'a>,
     path: CowArc<'a, Path>,
     label: Option<CowArc<'a, str>>,
+    query_string: Option<CowArc<'a, str>>,
 }
 
 impl<'a> Debug for AssetPath<'a> {
@@ -67,6 +68,9 @@ impl<'a> Display for AssetPath<'a> {
             write!(f, "{name}://")?;
         }
         write!(f, "{}", self.path.display())?;
+        if let Some(query_string) = &self.query_string() {
+            write!(f, "?{query_string}")?;
+        }
         if let Some(label) = &self.label {
             write!(f, "#{label}")?;
         }
@@ -83,12 +87,18 @@ pub enum ParseAssetPathError {
     /// Error that occurs when the [`AssetPath::label`] section of a path string contains the [`AssetPath::source`] delimiter `://`. E.g. `source://file.test#bad://label`.
     #[error("Asset label must not contain a `://` substring")]
     InvalidLabelSyntax,
+    /// Error that occurs when the [`AssetPath::label`] section of a path string contains the [`AssetPath::source`] delimiter `://`. E.g. `source://file.test#bad://label`.
+    #[error("Asset query_string must not contain a `://` substring")]
+    InvalidQueryStringSyntax,
     /// Error that occurs when a path string has an [`AssetPath::source`] delimiter `://` with no characters preceding it. E.g. `://file.test`.
     #[error("Asset source must be at least one character. Either specify the source before the '://' or remove the `://`")]
     MissingSource,
     /// Error that occurs when a path string has an [`AssetPath::label`] delimiter `#` with no characters succeeding it. E.g. `file.test#`
     #[error("Asset label must be at least one character. Either specify the label after the '#' or remove the '#'")]
     MissingLabel,
+    /// Error that occurs when a path string has an [`AssetPath::label`] delimiter `#` with no characters succeeding it. E.g. `file.test#`
+    #[error("Asset query_string must be at least one character. Either specify the query_string after the '?' or remove the '?'")]
+    MissingQueryString,
 }
 
 impl<'a> AssetPath<'a> {
@@ -118,7 +128,7 @@ impl<'a> AssetPath<'a> {
     ///
     /// This will return a [`ParseAssetPathError`] if `asset_path` is in an invalid format.
     pub fn try_parse(asset_path: &'a str) -> Result<AssetPath<'a>, ParseAssetPathError> {
-        let (source, path, label) = Self::parse_internal(asset_path)?;
+        let (source, path, query_string, label) = Self::parse_internal(asset_path)?;
         Ok(Self {
             source: match source {
                 Some(source) => AssetSourceId::Name(CowArc::Borrowed(source)),
@@ -126,16 +136,18 @@ impl<'a> AssetPath<'a> {
             },
             path: CowArc::Borrowed(path),
             label: label.map(CowArc::Borrowed),
+            query_string: query_string.map(CowArc::Borrowed),
         })
     }
 
     // Attempts to Parse a &str into an `AssetPath`'s `AssetPath::source`, `AssetPath::path`, and `AssetPath::label` components.
     fn parse_internal(
         asset_path: &str,
-    ) -> Result<(Option<&str>, &Path, Option<&str>), ParseAssetPathError> {
+    ) -> Result<(Option<&str>, &Path, Option<&str>, Option<&str>), ParseAssetPathError> {
         let chars = asset_path.char_indices();
         let mut source_range = None;
         let mut path_range = 0..asset_path.len();
+        let mut query_string_range = None;
         let mut label_range = None;
 
         // Loop through the characters of the passed in &str to accomplish the following:
@@ -174,8 +186,17 @@ impl<'a> AssetPath<'a> {
                         _ => {}
                     }
                 }
-                '#' => {
+                '?' => {
                     path_range.end = index;
+                    query_string_range = Some(index + 1..asset_path.len());
+                    source_delimiter_chars_matched = 0;
+                }
+                '#' => {
+                    if let Some(query_range) = query_string_range.as_mut() {
+                        query_range.end = index;
+                    } else {
+                        path_range.end = index;
+                    }
                     label_range = Some(index + 1..asset_path.len());
                     source_delimiter_chars_matched = 0;
                 }
@@ -191,6 +212,15 @@ impl<'a> AssetPath<'a> {
                 return Err(ParseAssetPathError::InvalidLabelSyntax);
             }
         }
+
+        // If we found an `AssetPath::query_string`
+        if let Some(range) = query_string_range.clone() {
+            // If the `AssetPath::label` contained a `://` substring, it is invalid.
+            if range.start <= last_found_source_index {
+                return Err(ParseAssetPathError::InvalidQueryStringSyntax);
+            }
+        }
+
         // Try to parse the range of indices that represents the `AssetPath::source` portion of the `AssetPath` to make sure it is not empty.
         // This would be the case if the input &str was something like `://some/file.test`
         let source = match source_range {
@@ -214,8 +244,20 @@ impl<'a> AssetPath<'a> {
             None => None,
         };
 
+        // Try to parse the range of indices that represents the `AssetPath::label` portion of the `AssetPath` to make sure it is not empty.
+        // This would be the case if the input &str was something like `some/file.test#`.
+        let query_string = match query_string_range {
+            Some(query_string_range) => {
+                if query_string_range.is_empty() {
+                    return Err(ParseAssetPathError::MissingQueryString);
+                }
+                Some(&asset_path[query_string_range])
+            }
+            None => None,
+        };
+
         let path = Path::new(&asset_path[path_range]);
-        Ok((source, path, label))
+        Ok((source, path, query_string, label))
     }
 
     /// Creates a new [`AssetPath`] from a [`Path`].
@@ -225,6 +267,7 @@ impl<'a> AssetPath<'a> {
             path: CowArc::Borrowed(path),
             source: AssetSourceId::Default,
             label: None,
+            query_string: None,
         }
     }
 
@@ -239,6 +282,12 @@ impl<'a> AssetPath<'a> {
     #[inline]
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
+    }
+
+    /// Gets the "query_string".
+    #[inline]
+    pub fn query_string(&self) -> Option<&str> {
+        self.query_string.as_deref()
     }
 
     /// Gets the "sub-asset label".
@@ -260,6 +309,18 @@ impl<'a> AssetPath<'a> {
             source: self.source.clone(),
             path: self.path.clone(),
             label: None,
+            query_string: self.query_string.clone(),
+        }
+    }
+
+    /// Gets the path to the asset in the "virtual filesystem" without a query_string (if a query_string is currently set).
+    #[inline]
+    pub fn without_query_string(&self) -> AssetPath<'_> {
+        Self {
+            source: self.source.clone(),
+            path: self.path.clone(),
+            label: self.label.clone(),
+            query_string: None,
         }
     }
 
@@ -269,10 +330,22 @@ impl<'a> AssetPath<'a> {
         self.label = None;
     }
 
+    /// Removes the "query_string" from this [`AssetPath`], if one was set.
+    #[inline]
+    pub fn remove_query_string(&mut self) {
+        self.query_string = None;
+    }
+
     /// Takes the "sub-asset label" from this [`AssetPath`], if one was set.
     #[inline]
     pub fn take_label(&mut self) -> Option<CowArc<'a, str>> {
         self.label.take()
+    }
+
+    /// Takes the "query_string" from this [`AssetPath`], if one was set.
+    #[inline]
+    pub fn take_query_string(&mut self) -> Option<CowArc<'a, str>> {
+        self.query_string.take()
     }
 
     /// Returns this asset path with the given label. This will replace the previous
@@ -283,6 +356,19 @@ impl<'a> AssetPath<'a> {
             source: self.source,
             path: self.path,
             label: Some(label.into()),
+            query_string: self.query_string,
+        }
+    }
+
+    /// Returns this asset path with the given query_string. This will replace the previous
+    /// query_string if it exists.
+    #[inline]
+    pub fn with_query_string(self, query_string: impl Into<CowArc<'a, str>>) -> AssetPath<'a> {
+        AssetPath {
+            source: self.source,
+            path: self.path,
+            label: self.label,
+            query_string: Some(query_string.into()),
         }
     }
 
@@ -294,6 +380,7 @@ impl<'a> AssetPath<'a> {
             source: source.into(),
             path: self.path,
             label: self.label,
+            query_string: self.query_string,
         }
     }
 
@@ -308,6 +395,7 @@ impl<'a> AssetPath<'a> {
             source: self.source.clone(),
             label: None,
             path,
+            query_string: None,
         })
     }
 
@@ -321,6 +409,7 @@ impl<'a> AssetPath<'a> {
             source: self.source.into_owned(),
             path: self.path.into_owned(),
             label: self.label.map(CowArc::into_owned),
+            query_string: self.query_string.map(CowArc::into_owned),
         }
     }
 
@@ -410,7 +499,7 @@ impl<'a> AssetPath<'a> {
             // It's a label only
             Ok(self.clone_owned().with_label(label.to_owned()))
         } else {
-            let (source, rpath, rlabel) = AssetPath::parse_internal(path)?;
+            let (source, rpath, rquery_string, rlabel) = AssetPath::parse_internal(path)?;
             let mut base_path = PathBuf::from(self.path());
             if replace && !self.path.to_str().unwrap().ends_with('/') {
                 // No error if base is empty (per RFC 1808).
@@ -442,6 +531,7 @@ impl<'a> AssetPath<'a> {
                 },
                 path: CowArc::Owned(result_path.into()),
                 label: rlabel.map(|l| CowArc::Owned(l.into())),
+                query_string: rquery_string.map(|l| CowArc::Owned(l.into())),
             })
         }
     }
@@ -478,11 +568,12 @@ impl<'a> AssetPath<'a> {
 impl From<&'static str> for AssetPath<'static> {
     #[inline]
     fn from(asset_path: &'static str) -> Self {
-        let (source, path, label) = Self::parse_internal(asset_path).unwrap();
+        let (source, path, query_string, label) = Self::parse_internal(asset_path).unwrap();
         AssetPath {
             source: source.into(),
             path: CowArc::Static(path),
             label: label.map(CowArc::Static),
+            query_string: query_string.map(CowArc::Static),
         }
     }
 }
@@ -508,6 +599,7 @@ impl From<&'static Path> for AssetPath<'static> {
             source: AssetSourceId::Default,
             path: CowArc::Static(path),
             label: None,
+            query_string: None,
         }
     }
 }
@@ -519,6 +611,7 @@ impl From<PathBuf> for AssetPath<'static> {
             source: AssetSourceId::Default,
             path: path.into(),
             label: None,
+            query_string: None,
         }
     }
 }
@@ -604,37 +697,82 @@ mod tests {
     #[test]
     fn parse_asset_path() {
         let result = AssetPath::parse_internal("a/b.test");
-        assert_eq!(result, Ok((None, Path::new("a/b.test"), None)));
+        assert_eq!(result, Ok((None, Path::new("a/b.test"), None, None)));
 
         let result = AssetPath::parse_internal("http://a/b.test");
-        assert_eq!(result, Ok((Some("http"), Path::new("a/b.test"), None)));
+        assert_eq!(
+            result,
+            Ok((Some("http"), Path::new("a/b.test"), None, None))
+        );
 
         let result = AssetPath::parse_internal("http://a/b.test#Foo");
         assert_eq!(
             result,
-            Ok((Some("http"), Path::new("a/b.test"), Some("Foo")))
+            Ok((Some("http"), Path::new("a/b.test"), None, Some("Foo")))
         );
 
         let result = AssetPath::parse_internal("localhost:80/b.test");
-        assert_eq!(result, Ok((None, Path::new("localhost:80/b.test"), None)));
+        assert_eq!(
+            result,
+            Ok((None, Path::new("localhost:80/b.test"), None, None))
+        );
 
         let result = AssetPath::parse_internal("http://localhost:80/b.test");
         assert_eq!(
             result,
-            Ok((Some("http"), Path::new("localhost:80/b.test"), None))
+            Ok((Some("http"), Path::new("localhost:80/b.test"), None, None))
         );
 
         let result = AssetPath::parse_internal("http://localhost:80/b.test#Foo");
         assert_eq!(
             result,
-            Ok((Some("http"), Path::new("localhost:80/b.test"), Some("Foo")))
+            Ok((
+                Some("http"),
+                Path::new("localhost:80/b.test"),
+                None,
+                Some("Foo")
+            ))
+        );
+
+        let result = AssetPath::parse_internal("http://localhost:80/b.test?Foo");
+        assert_eq!(
+            result,
+            Ok((
+                Some("http"),
+                Path::new("localhost:80/b.test"),
+                Some("Foo"),
+                None,
+            ))
+        );
+
+        let result = AssetPath::parse_internal("http://localhost:80/b.test?Foo#Foo");
+        assert_eq!(
+            result,
+            Ok((
+                Some("http"),
+                Path::new("localhost:80/b.test"),
+                Some("Foo"),
+                Some("Foo"),
+            ))
         );
 
         let result = AssetPath::parse_internal("#insource://a/b.test");
         assert_eq!(result, Err(crate::ParseAssetPathError::InvalidSourceSyntax));
 
+        let result = AssetPath::parse_internal("?insource://a/b.test");
+        assert_eq!(
+            result,
+            Err(crate::ParseAssetPathError::InvalidQueryStringSyntax)
+        );
+
         let result = AssetPath::parse_internal("source://a/b.test#://inlabel");
         assert_eq!(result, Err(crate::ParseAssetPathError::InvalidLabelSyntax));
+
+        let result = AssetPath::parse_internal("source://a/b.test?://inquerystring");
+        assert_eq!(
+            result,
+            Err(crate::ParseAssetPathError::InvalidQueryStringSyntax)
+        );
 
         let result = AssetPath::parse_internal("#insource://a/b.test#://inlabel");
         assert!(
@@ -642,14 +780,20 @@ mod tests {
                 || result == Err(crate::ParseAssetPathError::InvalidLabelSyntax)
         );
 
+        let result = AssetPath::parse_internal("#insource://a/b.test?://inquerystring");
+        assert!(
+            result == Err(crate::ParseAssetPathError::InvalidSourceSyntax)
+                || result == Err(crate::ParseAssetPathError::InvalidQueryStringSyntax)
+        );
+
         let result = AssetPath::parse_internal("http://");
-        assert_eq!(result, Ok((Some("http"), Path::new(""), None)));
+        assert_eq!(result, Ok((Some("http"), Path::new(""), None, None)));
 
         let result = AssetPath::parse_internal("://x");
         assert_eq!(result, Err(crate::ParseAssetPathError::MissingSource));
 
-        let result = AssetPath::parse_internal("a/b.test#");
-        assert_eq!(result, Err(crate::ParseAssetPathError::MissingLabel));
+        let result = AssetPath::parse_internal("a/b.test?");
+        assert_eq!(result, Err(crate::ParseAssetPathError::MissingQueryString));
     }
 
     #[test]

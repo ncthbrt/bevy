@@ -8,7 +8,8 @@ use bevy::{
 };
 
 /// This example uses a shader source file from the assets subdirectory
-const SHADER_ASSET_PATH: &str = "shaders/extended_material.wgsl";
+const SHADER_ASSET_PATH: &str =
+    "embedded://bevy_pbr/render/pbr.wgsl?additional_imports=shaders/extended_material.wgsl";
 
 fn main() {
     App::new()
@@ -42,7 +43,7 @@ fn setup(
                 // change the above to `OpaqueRendererMethod::Deferred` or add the `DefaultOpaqueRendererMethod` resource.
                 ..Default::default()
             },
-            extension: MyExtension { quantize_steps: 3 },
+            extension: MyExtension {},
         }),
         ..default()
     });
@@ -73,12 +74,7 @@ fn rotate_things(mut q: Query<&mut Transform, With<Rotate>>, time: Res<Time>) {
 }
 
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
-struct MyExtension {
-    // We need to ensure that the bindings of the base material and the extension do not conflict,
-    // so we start from binding slot 100, leaving slots 0-99 for the base material.
-    #[uniform(100)]
-    quantize_steps: u32,
-}
+struct MyExtension {}
 
 impl MaterialExtension for MyExtension {
     fn fragment_shader() -> ShaderRef {
